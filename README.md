@@ -1,8 +1,3 @@
-Below is a **complete, production-ready README.md** for **DCleaner Bot**, written for performance-focused users and contributors.
-You can copy this **as-is** into `README.md` on **github.com/terminalskid/dcleaner**.
-
----
-
 # 🧹 DCleaner Bot
 
 **DCleaner Bot** is a **high-performance Discord maintenance bot** built for **server owners, developers, and power users** who want **fast, rule-based channel cleanup and creation** with **zero bloat**.
