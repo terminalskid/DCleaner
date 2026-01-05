@@ -94,10 +94,16 @@ npm install
 Create a `.env` file:
 
 ```env
+TOKEN=YOUR_BOT_TOKEN
+```
+
+or
+
+```env
 DISCORD_TOKEN=YOUR_BOT_TOKEN
 ```
 
-> The bot **will not start** without a token.
+> The bot **will not start** without a token. Both `TOKEN` and `DISCORD_TOKEN` are supported.
 
 ---
 
