@@ -30,9 +30,9 @@ DEFAULT_CONFIG = {
     "WHITELIST_CHANNEL_IDS": [],
     "WHITELIST_CATEGORY_IDS": [],
     "AUTO_CREATE_CHANNELS": [
-        {"name": "📢┃announcements", "type": "text"},
-        {"name": "💬┃general", "type": "text"},
-        {"name": "🎫┃tickets", "type": "text"},
+        {"name": "📢┃announcements", "type": "text", "category_id": None, "position": None},
+        {"name": "💬┃general", "type": "text", "category_id": None, "position": None},
+        {"name": "🎫┃tickets", "type": "text", "category_id": None, "position": None},
     ],
     "RATE_LIMIT_DELAY": 1.0,
     "REQUIRE_CONFIRMATION": True,
@@ -81,7 +81,7 @@ def days_ago(date: datetime) -> int:
     return (datetime.now() - date).days
 
 
-def should_delete_channel(channel: discord.abc.GuildChannel, guild: discord.Guild) -> Tuple[bool, str]:
+async def should_delete_channel(channel: discord.abc.GuildChannel, guild: discord.Guild) -> Tuple[bool, str]:
     """Check if a channel should be deleted based on rules"""
     # Whitelist checks
     if channel.id in CONFIG["WHITELIST_CHANNEL_IDS"]:
@@ -117,6 +117,16 @@ def should_delete_channel(channel: discord.abc.GuildChannel, guild: discord.Guil
         age = days_ago(channel.created_at)
         if age >= CONFIG["DELETE_IF_OLDER_THAN_DAYS"]:
             return True, f"Older than {CONFIG['DELETE_IF_OLDER_THAN_DAYS']} days ({age} days old)"
+
+    # Empty check (requires fetching messages)
+    if CONFIG["DELETE_IF_EMPTY"] and isinstance(channel, discord.TextChannel):
+        try:
+            messages = await channel.history(limit=1).flatten()
+            if len(messages) == 0:
+                return True, "Empty channel (no messages)"
+        except Exception as e:
+            # If we can't fetch messages, skip empty check
+            log(f"Could not check if channel {channel.name} is empty: {e}", "warn")
 
     return False, "No match"
 
@@ -319,12 +329,18 @@ async def dpreview(interaction: discord.Interaction):
     to_delete = []
     to_keep = []
 
+    # Skip empty check in preview for performance (can be slow with many channels)
+    temp_config = CONFIG["DELETE_IF_EMPTY"]
+    CONFIG["DELETE_IF_EMPTY"] = False
+    
     for channel in channels:
-        should_delete, reason = should_delete_channel(channel, guild)
+        should_delete, reason = await should_delete_channel(channel, guild)
         if should_delete and channel.permissions_for(guild.me).manage_channels:
             to_delete.append({"channel": channel, "reason": reason})
         else:
             to_keep.append({"channel": channel, "reason": reason})
+    
+    CONFIG["DELETE_IF_EMPTY"] = temp_config
 
     embed = discord.Embed(
         title="👁️ Cleanup Preview",
@@ -374,13 +390,18 @@ async def dstats(interaction: discord.Interaction):
         "whitelisted": len([c for c in channels if c.id in CONFIG["WHITELIST_CHANNEL_IDS"]]),
     }
 
-    to_delete = len(
-        [
-            c
-            for c in channels
-            if should_delete_channel(c, guild)[0] and c.permissions_for(guild.me).manage_channels
-        ]
-    )
+    # Skip empty check in stats for performance (can be slow with many channels)
+    temp_config = CONFIG["DELETE_IF_EMPTY"]
+    CONFIG["DELETE_IF_EMPTY"] = False
+    
+    to_delete = []
+    for c in channels:
+        should_delete, _ = await should_delete_channel(c, guild)
+        if should_delete and c.permissions_for(guild.me).manage_channels:
+            to_delete.append(c)
+    to_delete_count = len(to_delete)
+    
+    CONFIG["DELETE_IF_EMPTY"] = temp_config
 
     embed = discord.Embed(
         title="📊 Server Statistics",
@@ -391,7 +412,7 @@ async def dstats(interaction: discord.Interaction):
     embed.add_field(name="💬 Text Channels", value=str(stats["text"]), inline=True)
     embed.add_field(name="🔊 Voice Channels", value=str(stats["voice"]), inline=True)
     embed.add_field(name="📂 Categories", value=str(stats["category"]), inline=True)
-    embed.add_field(name="🗑️ Would Delete", value=str(to_delete), inline=True)
+    embed.add_field(name="🗑️ Would Delete", value=str(to_delete_count), inline=True)
     embed.add_field(name="🛡️ Whitelisted", value=str(stats["whitelisted"]), inline=True)
     embed.add_field(
         name="⚙️ Configuration",
@@ -616,7 +637,7 @@ async def dclean(interaction: discord.Interaction, confirm: bool = False):
     to_delete = []
 
     for channel in channels:
-        should_delete, reason = should_delete_channel(channel, guild)
+        should_delete, reason = await should_delete_channel(channel, guild)
         if should_delete and channel.permissions_for(guild.me).manage_channels:
             to_delete.append({"channel": channel, "reason": reason})
 
@@ -714,15 +735,39 @@ async def dcreate(interaction: discord.Interaction):
             continue
 
         try:
+            # Category-aware and position-aware creation
+            category_id = ch_config.get("category_id")
+            position = ch_config.get("position")
+            
             if ch_type == "text":
-                await interaction.guild.create_text_channel(ch_name, reason="DCleaner auto-create")
+                channel = await interaction.guild.create_text_channel(
+                    ch_name,
+                    category=discord.utils.get(interaction.guild.categories, id=category_id) if category_id else None,
+                    position=position if position is not None else None,
+                    reason="DCleaner auto-create"
+                )
             elif ch_type == "voice":
-                await interaction.guild.create_voice_channel(ch_name, reason="DCleaner auto-create")
+                channel = await interaction.guild.create_voice_channel(
+                    ch_name,
+                    category=discord.utils.get(interaction.guild.categories, id=category_id) if category_id else None,
+                    position=position if position is not None else None,
+                    reason="DCleaner auto-create"
+                )
             else:
-                await interaction.guild.create_text_channel(ch_name, reason="DCleaner auto-create")
+                channel = await interaction.guild.create_text_channel(
+                    ch_name,
+                    category=discord.utils.get(interaction.guild.categories, id=category_id) if category_id else None,
+                    position=position if position is not None else None,
+                    reason="DCleaner auto-create"
+                )
 
             created += 1
-            log(f"Created channel: {ch_name}")
+            log_msg = f"Created channel: {ch_name}"
+            if category_id:
+                log_msg += f" in category {category_id}"
+            if position is not None:
+                log_msg += f" at position {position}"
+            log(log_msg)
 
             if CONFIG["RATE_LIMIT_DELAY"] > 0 and created < len(CONFIG["AUTO_CREATE_CHANNELS"]):
                 await asyncio.sleep(CONFIG["RATE_LIMIT_DELAY"])

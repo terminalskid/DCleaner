@@ -35,9 +35,9 @@ const DEFAULT_CONFIG = {
   WHITELIST_CHANNEL_IDS: [],
   WHITELIST_CATEGORY_IDS: [],
   AUTO_CREATE_CHANNELS: [
-    { name: "📢┃announcements", type: ChannelType.GuildText },
-    { name: "💬┃general", type: ChannelType.GuildText },
-    { name: "🎫┃tickets", type: ChannelType.GuildText },
+    { name: "📢┃announcements", type: ChannelType.GuildText, categoryId: null, position: null },
+    { name: "💬┃general", type: ChannelType.GuildText, categoryId: null, position: null },
+    { name: "🎫┃tickets", type: ChannelType.GuildText, categoryId: null, position: null },
   ],
   RATE_LIMIT_DELAY: 1000,
   REQUIRE_CONFIRMATION: true,
@@ -120,7 +120,7 @@ function validateConfig() {
 }
 
 // Check if channel matches deletion criteria
-function shouldDeleteChannel(channel, guild) {
+async function shouldDeleteChannel(channel, guild) {
   // Whitelist checks
   if (CONFIG.WHITELIST_CHANNEL_IDS.includes(channel.id)) {
     return { shouldDelete: false, reason: "Whitelisted channel" };
@@ -162,7 +162,15 @@ function shouldDeleteChannel(channel, guild) {
 
   // Empty check (requires fetching messages)
   if (CONFIG.DELETE_IF_EMPTY && channel.isTextBased()) {
-    // This will be checked separately as it requires async
+    try {
+      const messages = await channel.messages.fetch({ limit: 1 });
+      if (messages.size === 0) {
+        return { shouldDelete: true, reason: "Empty channel (no messages)" };
+      }
+    } catch (err) {
+      // If we can't fetch messages, skip empty check
+      log(`Could not check if channel ${channel.name} is empty: ${err.message}`, "warn");
+    }
   }
 
   return { shouldDelete: false, reason: "No match" };
@@ -514,14 +522,20 @@ client.on("interactionCreate", async (interaction) => {
       const toDelete = [];
       const toKeep = [];
 
+      // Skip empty check in preview for performance (can be slow with many channels)
+      const tempConfig = CONFIG.DELETE_IF_EMPTY;
+      CONFIG.DELETE_IF_EMPTY = false;
+      
       for (const channel of channels) {
-        const result = shouldDeleteChannel(channel, guild);
+        const result = await shouldDeleteChannel(channel, guild);
         if (result.shouldDelete && channel.deletable) {
           toDelete.push({ channel, reason: result.reason });
         } else {
           toKeep.push({ channel, reason: result.reason });
         }
       }
+      
+      CONFIG.DELETE_IF_EMPTY = tempConfig;
 
       const embed = new EmbedBuilder()
         .setTitle("👁️ Cleanup Preview")
@@ -572,10 +586,20 @@ client.on("interactionCreate", async (interaction) => {
         whitelisted: channels.filter((c) => CONFIG.WHITELIST_CHANNEL_IDS.includes(c.id)).length,
       };
 
-      const toDelete = channels.filter((c) => {
-        const result = shouldDeleteChannel(c, guild);
-        return result.shouldDelete && c.deletable;
-      }).length;
+      // Skip empty check in stats for performance (can be slow with many channels)
+      const tempConfig = CONFIG.DELETE_IF_EMPTY;
+      CONFIG.DELETE_IF_EMPTY = false;
+      
+      const toDelete = [];
+      for (const c of channels) {
+        const result = await shouldDeleteChannel(c, guild);
+        if (result.shouldDelete && c.deletable) {
+          toDelete.push(c);
+        }
+      }
+      const toDeleteCount = toDelete.length;
+      
+      CONFIG.DELETE_IF_EMPTY = tempConfig;
 
       const embed = new EmbedBuilder()
         .setTitle("📊 Server Statistics")
@@ -586,7 +610,7 @@ client.on("interactionCreate", async (interaction) => {
           { name: "💬 Text Channels", value: `${stats.text}`, inline: true },
           { name: "🔊 Voice Channels", value: `${stats.voice}`, inline: true },
           { name: "📂 Categories", value: `${stats.category}`, inline: true },
-          { name: "🗑️ Would Delete", value: `${toDelete}`, inline: true },
+          { name: "🗑️ Would Delete", value: `${toDeleteCount}`, inline: true },
           { name: "🛡️ Whitelisted", value: `${stats.whitelisted}`, inline: true },
           {
             name: "⚙️ Configuration",
@@ -793,7 +817,7 @@ client.on("interactionCreate", async (interaction) => {
       const toDelete = [];
 
       for (const channel of channels) {
-        const result = shouldDeleteChannel(channel, guild);
+        const result = await shouldDeleteChannel(channel, guild);
         if (result.shouldDelete && channel.deletable) {
           toDelete.push({ channel, reason: result.reason });
         }
@@ -890,13 +914,25 @@ client.on("interactionCreate", async (interaction) => {
         }
 
         try {
-          await interaction.guild.channels.create({
+          const createOptions = {
             name: ch.name,
             type: ch.type,
             reason: "DCleaner auto-create",
-          });
+          };
+
+          // Category-aware creation
+          if (ch.categoryId) {
+            createOptions.parent = ch.categoryId;
+          }
+
+          // Position-aware creation
+          if (ch.position !== null && ch.position !== undefined) {
+            createOptions.position = ch.position;
+          }
+
+          await interaction.guild.channels.create(createOptions);
           created++;
-          log(`Created channel: ${ch.name}`);
+          log(`Created channel: ${ch.name}${ch.categoryId ? ` in category ${ch.categoryId}` : ""}${ch.position !== null ? ` at position ${ch.position}` : ""}`);
 
           if (CONFIG.RATE_LIMIT_DELAY > 0 && created < CONFIG.AUTO_CREATE_CHANNELS.length) {
             await delay(CONFIG.RATE_LIMIT_DELAY);
